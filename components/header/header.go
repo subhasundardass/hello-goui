@@ -218,17 +218,13 @@ func userMenu() ui.View {
 // Header
 // -----------------------------------------------------------------------------
 
-func View(content ui.View) ui.View {
-	all := components.Menus()
+func View(content ui.View, openScreen func(string)) ui.View {
+	all := components.Menus(openScreen)
 
 	// Application identity.
 	brand := ui.HBox(
-
 		ui.Label("DORII").
 			Style(logoStyle),
-
-		// ui.Label(CompanyName).
-		// 	Style(companyStyle),
 	).
 		Spacing(12).
 		CrossAlign(layout.CrossCenter)
@@ -253,7 +249,7 @@ func View(content ui.View) ui.View {
 		Spacing(8).
 		CrossAlign(layout.CrossCenter)
 
-		// Main header bar.
+	// Main header bar.
 	bar := ui.HBox(
 		ui.HBox(
 			ui.HBox().MinWidth(10),

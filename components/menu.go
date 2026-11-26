@@ -13,19 +13,33 @@ type Menu struct {
 }
 
 func Item(label string, action func()) Node {
-	return Node{Label: label, Action: action}
+	return Node{
+		Label:  label,
+		Action: action,
+	}
 }
 
 func Submenu(label string, children ...Node) Node {
-	return Node{Label: label, Children: children}
+	return Node{
+		Label:    label,
+		Children: children,
+	}
 }
 
 func Separator() Node {
 	return Node{Sep: true}
 }
 
-func Menus() []Menu {
+func Menus(openScreen func(string)) []Menu {
 	noop := func() {}
+
+	open := func(id string) func() {
+		return func() {
+			if openScreen != nil {
+				openScreen(id)
+			}
+		}
+	}
 
 	return []Menu{
 		{"File", []Node{
@@ -50,9 +64,9 @@ func Menus() []Menu {
 			Item("Full Screen", noop),
 		}},
 		{"Masters", []Node{
-			Item("Customers", noop),
-			Item("Suppliers", noop),
-			Item("Products", noop),
+			Item("Customers", open("customers")),
+			Item("Suppliers", open("suppliers")),
+			Item("Products", open("products")),
 			Separator(),
 			Item("Users", noop),
 		}},

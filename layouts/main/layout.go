@@ -9,7 +9,11 @@ import (
 	"github.com/golang-gui/goui/ui"
 )
 
-func View(app ui.App, content ui.View) ui.View {
+func View(
+	app ui.App,
+	content ui.View,
+	openScreen func(string),
+) ui.View {
 	body := ui.VBox(
 		ui.HBox(
 			sidebar.View(),
@@ -23,5 +27,5 @@ func View(app ui.App, content ui.View) ui.View {
 		Spacing(0).
 		CrossAlign(layout.CrossStretch)
 
-	return header.View(body)
+	return header.View(body, openScreen)
 }

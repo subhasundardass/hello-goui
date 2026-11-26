@@ -2,19 +2,24 @@ package windows
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
 
 type Manager struct {
-	mu sync.RWMutex
-
+	mu       sync.RWMutex
 	registry *Registry
 	host     WindowHost
-
-	windows map[WindowID]*Instance
-	closed  bool
+	windows  map[WindowID]*Instance
+	closed   bool
 }
+
+var (
+	ErrWindowNotFound = errors.New("window not found")
+	ErrInvalidScreen  = errors.New("invalid screen")
+	ErrInvalidWindow  = errors.New("invalid native window")
+)
 
 func NewManager(registry *Registry, host WindowHost) *Manager {
 	if registry == nil {
@@ -38,81 +43,154 @@ func (m *Manager) Open(
 	params any,
 	options WindowOptions,
 ) (*Instance, error) {
+	if m == nil {
+		return nil, ErrManagerClosed
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if m.host == nil {
 		return nil, fmt.Errorf("window host is not configured")
 	}
 
+	instance := newInstance(screenID, options)
+
+	// Reserve the instance and register its parent-child relationship.
 	m.mu.Lock()
+
 	if m.closed {
 		m.mu.Unlock()
 		return nil, ErrManagerClosed
 	}
 
-	var parent NativeWindow
+	var (
+		parent         NativeWindow
+		parentInstance *Instance
+	)
 
 	if options.Parent != "" {
-		parentInstance := m.windows[options.Parent]
+		parentInstance = m.windows[options.Parent]
+
 		if parentInstance == nil || parentInstance.IsClosed() {
 			m.mu.Unlock()
 			return nil, fmt.Errorf("parent: %w", ErrWindowNotFound)
 		}
-		parent = parentInstance.Native
+
+		parent = parentInstance.nativeWindow()
+
+		if parent == nil {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("parent window is not ready")
+		}
+
+		parentInstance.AddChild(instance.ID)
 	}
 
-	instance := newInstance(screenID, options)
 	m.windows[instance.ID] = instance
 	m.mu.Unlock()
 
+	cleanup := func() {
+		m.removeInstance(instance)
+		instance.markClosing()
+		instance.markClosed()
+		instance.Results.Complete(nil, ErrWindowClosed)
+	}
+
+	// Resolve screen factory.
 	factory, err := m.registry.Get(screenID)
 	if err != nil {
-		m.removeInstance(instance)
+		cleanup()
 		return nil, err
 	}
 
+	// Create screen.
 	screen, err := factory(params)
 	if err != nil {
-		m.removeInstance(instance)
+		cleanup()
 		return nil, err
 	}
 
-	instance.Screen = screen
+	if screen == nil {
+		cleanup()
+		return nil, ErrInvalidScreen
+	}
 
-	native, err := m.host.Create(
-		ctx,
-		options,
-		screen.View(),
-		parent,
-	)
+	instance.setScreen(screen)
+
+	if err := ctx.Err(); err != nil {
+		cleanup()
+		return nil, err
+	}
+
+	// Create native window.
+	native, err := m.host.Create(ctx, options, screen.View(), parent)
 	if err != nil {
-		m.removeInstance(instance)
+		cleanup()
 		return nil, err
 	}
 
-	instance.Native = native
-
-	if options.Mode == WindowModal {
-		if err := native.SetModal(true); err != nil {
-			_ = native.Close()
-			m.removeInstance(instance)
-			return nil, err
-		}
+	if native == nil {
+		cleanup()
+		return nil, ErrInvalidWindow
 	}
 
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		_ = native.Close()
-		m.removeInstance(instance)
-		return nil, ErrManagerClosed
-	}
+	instance.setNative(native)
+
+	// Check manager and parent lifecycle.
+	m.mu.RLock()
+
+	managerClosed := m.closed
+	registered := m.windows[instance.ID] == instance
+	parentStillOpen := true
 
 	if options.Parent != "" {
-		if parentInstance := m.windows[options.Parent]; parentInstance != nil {
-			parentInstance.AddChild(instance.ID)
-		}
-	}
-	m.mu.Unlock()
+		currentParent := m.windows[options.Parent]
 
+		parentStillOpen = currentParent == parentInstance &&
+			currentParent != nil &&
+			!currentParent.IsClosed()
+	}
+
+	m.mu.RUnlock()
+
+	if managerClosed || !registered || !parentStillOpen || ctx.Err() != nil {
+		_ = native.Close()
+		cleanup()
+
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		if managerClosed {
+			return nil, ErrManagerClosed
+		}
+
+		return nil, fmt.Errorf("parent window closed while child was opening")
+	}
+
+	// Register native close callback.
+	if err := native.SetOnClose(func() {
+		_ = m.Close(instance.ID)
+	}); err != nil {
+		_ = native.Close()
+		cleanup()
+		return nil, err
+	}
+
+	// Transition from creating to open.
+	if !instance.markOpen() {
+		_ = native.Close()
+		cleanup()
+		return nil, ErrWindowClosed
+	}
+
+	// Show native window.
 	if err := native.Show(); err != nil {
 		_ = m.Close(instance.ID)
 		return nil, err
@@ -122,6 +200,10 @@ func (m *Manager) Open(
 }
 
 func (m *Manager) Get(id WindowID) (*Instance, bool) {
+	if m == nil {
+		return nil, false
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -130,10 +212,15 @@ func (m *Manager) Get(id WindowID) (*Instance, bool) {
 }
 
 func (m *Manager) Instances() []*Instance {
+	if m == nil {
+		return nil
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	instances := make([]*Instance, 0, len(m.windows))
+
 	for _, instance := range m.windows {
 		instances = append(instances, instance)
 	}
@@ -145,7 +232,9 @@ func (m *Manager) removeInstance(instance *Instance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	delete(m.windows, instance.ID)
+	if m.windows[instance.ID] == instance {
+		delete(m.windows, instance.ID)
+	}
 
 	if instance.ParentID != "" {
 		if parent := m.windows[instance.ParentID]; parent != nil {
@@ -155,6 +244,10 @@ func (m *Manager) removeInstance(instance *Instance) {
 }
 
 func (m *Manager) Close(id WindowID) error {
+	if m == nil {
+		return ErrManagerClosed
+	}
+
 	m.mu.RLock()
 	instance := m.windows[id]
 	m.mu.RUnlock()
@@ -163,47 +256,64 @@ func (m *Manager) Close(id WindowID) error {
 		return ErrWindowNotFound
 	}
 
-	if !instance.markClosed() {
+	if !instance.markClosing() {
 		return ErrWindowClosed
 	}
 
-	var closeErr error
+	var firstErr error
 
-	// Close children before closing their parent.
+	// Close children before the parent.
 	for _, childID := range instance.Children() {
-		if err := m.Close(childID); err != nil && closeErr == nil {
-			closeErr = err
+		if err := m.Close(childID); err != nil &&
+			err != ErrWindowNotFound &&
+			err != ErrWindowClosed &&
+			firstErr == nil {
+			firstErr = err
 		}
 	}
 
-	if instance.Native != nil {
-		if err := instance.Native.Close(); err != nil && closeErr == nil {
-			closeErr = err
+	// Close native window.
+	if native := instance.nativeWindow(); native != nil {
+		if err := native.Close(); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 
 	instance.Results.Complete(nil, ErrWindowClosed)
+	instance.markClosed()
+
 	m.removeInstance(instance)
 
-	return closeErr
+	return firstErr
 }
 
 func (m *Manager) CloseAll() error {
+	if m == nil {
+		return ErrManagerClosed
+	}
+
 	m.mu.Lock()
+
 	m.closed = true
 
-	var roots []WindowID
+	// Collect root windows.
+	roots := make([]WindowID, 0)
+
 	for id, instance := range m.windows {
 		if instance.ParentID == "" {
 			roots = append(roots, id)
 		}
 	}
+
 	m.mu.Unlock()
 
 	var firstErr error
 
 	for _, id := range roots {
-		if err := m.Close(id); err != nil && firstErr == nil {
+		if err := m.Close(id); err != nil &&
+			err != ErrWindowNotFound &&
+			err != ErrWindowClosed &&
+			firstErr == nil {
 			firstErr = err
 		}
 	}
