@@ -1,0 +1,20 @@
+module example.com/hello-goui
+
+go 1.27.4
+
+require github.com/golang-gui/goui v0.8.0
+
+require (
+	github.com/ebitengine/purego v0.10.2 // indirect
+	github.com/godbus/dbus/v5 v5.2.4 // indirect
+	github.com/goexlib/cgo v0.1.2 // indirect
+	github.com/goexlib/mathx v0.0.1 // indirect
+	github.com/golang-gui/nanovgo v0.0.13 // indirect
+	github.com/golang-gui/rasterx v0.1.0 // indirect
+	github.com/golang-gui/scanFT v0.1.0 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
+	github.com/xuges/gothread v0.0.1 // indirect
+	golang.org/x/image v0.24.0 // indirect
+	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/text v0.22.0 // indirect
+)
